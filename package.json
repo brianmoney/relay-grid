@@ -2,6 +2,7 @@
   "name": "relay-grid-sidecar",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Bootstrap scaffold for the relay-grid sidecar service.",
   "engines": {
     "node": ">=20.0.0"
