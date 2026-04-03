@@ -18,6 +18,13 @@ The MVP target is:
 - transcript delivery into Open Dispatch
 - OpenCode as the first agent backend
 
+## Document lookup policy
+- For OpenSpec and other repo markdown that is available through grounded-docs, prefer searching the grounded-docs index first.
+- The grounded-docs index name for this repo is `relay-grid`.
+- Use grounded-docs search to locate the relevant proposal, design, task, or spec content quickly.
+- After locating relevant results, use local file tools to inspect full files when detailed context, verification, or edits are needed.
+- Prefer the repo skill `grounded-docs-openspec` for this workflow.
+
 ## Architecture principles
 - Keep source-specific logic out of STT and agent-routing layers.
 - Keep STT backend logic out of source adapters.
@@ -101,6 +108,7 @@ Out of scope for MVP:
 
 ## When to use project skills
 Use the repo skills when working on:
+- OpenSpec document lookup through grounded-docs
 - source adapter contracts
 - Slack voice ingestion
 - audio normalization

@@ -3,40 +3,54 @@ import { writeFatalError } from "./utils/logger";
 
 type ShutdownSignal = "SIGINT" | "SIGTERM";
 
-const registerShutdownHandlers = (stop: () => Promise<void>): void => {
-  let shuttingDown = false;
+const waitForShutdown = (stop: () => Promise<void>): Promise<void> => {
+  return new Promise((resolve) => {
+    let shuttingDown = false;
+    const keepalive = setInterval(() => {
+      // Keep the sidecar process alive until an explicit shutdown signal arrives.
+    }, 1 << 30);
 
-  const shutdown = async (signal: ShutdownSignal): Promise<void> => {
-    if (shuttingDown) {
-      return;
-    }
+    const cleanup = (): void => {
+      clearInterval(keepalive);
+      process.off("SIGINT", handleSigint);
+      process.off("SIGTERM", handleSigterm);
+    };
 
-    shuttingDown = true;
+    const shutdown = async (signal: ShutdownSignal): Promise<void> => {
+      if (shuttingDown) {
+        return;
+      }
 
-    try {
-      await stop();
-      process.exit(0);
-    } catch (error) {
-      writeFatalError("shutdown", "shutdown_failed", error);
-      process.exit(1);
-    }
-  };
+      shuttingDown = true;
 
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.once(signal, () => {
-      void shutdown(signal);
-    });
-  }
+      try {
+        await stop();
+      } catch (error) {
+        process.exitCode = 1;
+        writeFatalError("shutdown", "shutdown_failed", error);
+      } finally {
+        cleanup();
+        resolve();
+      }
+    };
+
+    const handleSigint = (): void => {
+      void shutdown("SIGINT");
+    };
+
+    const handleSigterm = (): void => {
+      void shutdown("SIGTERM");
+    };
+
+    process.once("SIGINT", handleSigint);
+    process.once("SIGTERM", handleSigterm);
+  });
 };
 
 const main = async (): Promise<void> => {
   const app = await bootstrap();
 
-  registerShutdownHandlers(app.stop);
-
-  await new Promise<void>(() => {
-    // The sidecar stays alive until a shutdown signal is received.
-  });
+  await waitForShutdown(app.stop);
 };
 
 void main().catch((error) => {

@@ -382,14 +382,20 @@ export type TranscriptEnvelope = {
 ```
 
 ### Processing state
-Track:
+Track the canonical persisted lifecycle states:
 - received
-- downloading
-- downloaded
-- transcribing
+- audio_fetched
+- audio_normalized
 - transcribed
-- delivered
+- dispatched
+- completed
 - failed
+
+Notes:
+- `audio_fetched` replaces the earlier `downloading` / `downloaded` split with one post-fetch state.
+- `transcribing` is not modeled as a separate persisted lifecycle state in the current contract.
+- `dispatched` replaces the earlier `delivered` term.
+- `completed` captures successful end-to-end processing after dispatch-oriented work is done.
 
 ---
 

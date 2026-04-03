@@ -1,7 +1,9 @@
+import type { ConversationKey, DedupeKey, SourceName } from "./events";
+
 export interface ProcessingLogContext {
-  source?: string;
-  conversationKey?: string;
-  dedupeKey?: string;
+  source?: SourceName;
+  conversationKey?: ConversationKey;
+  dedupeKey?: DedupeKey;
   stage?: string;
   [key: string]: unknown;
 }
