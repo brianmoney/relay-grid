@@ -20,6 +20,9 @@ const DEFAULT_STT_FASTER_WHISPER_COMPUTE_TYPE = "int8";
 const DEFAULT_STT_FASTER_WHISPER_BEAM_SIZE = 5;
 const DEFAULT_PROCESSING_MAX_RETRY_ATTEMPTS = 3;
 const DEFAULT_PROCESSING_RETRY_BACKOFF_MS = 0;
+const DEFAULT_DISPATCH_MODE = "slack-repost";
+const DEFAULT_OPENDISPATCH_HTTP_ENDPOINT_PATH = "/ingress/transcripts";
+const DEFAULT_OPENDISPATCH_HTTP_TIMEOUT_MS = 10_000;
 
 const optionalTrimmedStringSchema = z.string().optional().transform((value) => {
   const trimmed = value?.trim();
@@ -30,6 +33,34 @@ const booleanFromEnvironmentSchema = z
   .enum(["true", "false"])
   .default("false")
   .transform((value) => value === "true");
+
+const optionalUrlStringSchema = optionalTrimmedStringSchema.superRefine((value, context) => {
+  if (!value) {
+    return;
+  }
+
+  try {
+    const url = new URL(value);
+
+    if (!url.protocol || !url.host) {
+      throw new Error("host_required");
+    }
+  } catch {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "must be a valid absolute URL",
+    });
+  }
+});
+
+const dispatchEndpointPathSchema = z
+  .string()
+  .trim()
+  .min(1, "OPENDISPATCH_HTTP_ENDPOINT_PATH must be set to a non-empty value")
+  .refine((value) => value.startsWith("/"), {
+    message: "OPENDISPATCH_HTTP_ENDPOINT_PATH must start with /",
+  })
+  .default(DEFAULT_OPENDISPATCH_HTTP_ENDPOINT_PATH);
 
 const slackAllowlistedChannelsSchema = z
   .string()
@@ -62,78 +93,98 @@ const slackAllowlistedChannelsSchema = z
     return Array.from(new Set(channelIds));
   });
 
-const runtimeConfigSchema = z.object({
-  SIDECAR_SERVICE_NAME: z
-    .string()
-    .trim()
-    .min(1, "SIDECAR_SERVICE_NAME must be set to a non-empty value"),
-  NODE_ENV: z.enum(["development", "test", "production"]),
-  SIDECAR_LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
-  SLACK_BOT_TOKEN: z
-    .string()
-    .trim()
-    .regex(/^xoxb-[A-Za-z0-9-]+$/, "SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-"),
-  SLACK_APP_TOKEN: z
-    .string()
-    .trim()
-    .regex(/^xapp-[A-Za-z0-9-]+$/, "SLACK_APP_TOKEN must be a Slack app token starting with xapp-"),
-  SLACK_ALLOWLISTED_CHANNELS: slackAllowlistedChannelsSchema,
-  SLACK_FAILURE_NOTICES_ENABLED: booleanFromEnvironmentSchema,
-  AUDIO_NORMALIZATION_FFMPEG_PATH: z.string().trim().min(1).default("ffmpeg"),
-  AUDIO_NORMALIZATION_FFPROBE_PATH: z.string().trim().min(1).default("ffprobe"),
-  AUDIO_NORMALIZATION_TEMP_DIRECTORY: z.string().trim().min(1).default(DEFAULT_AUDIO_TEMP_DIRECTORY),
-  AUDIO_NORMALIZATION_MAX_INPUT_BYTES: z.coerce
-    .number()
-    .int()
-    .positive("AUDIO_NORMALIZATION_MAX_INPUT_BYTES must be a positive integer")
-    .default(DEFAULT_NORMALIZATION_MAX_INPUT_BYTES),
-  AUDIO_NORMALIZATION_MAX_DURATION_MS: z.coerce
-    .number()
-    .int()
-    .positive("AUDIO_NORMALIZATION_MAX_DURATION_MS must be a positive integer")
-    .default(DEFAULT_NORMALIZATION_MAX_DURATION_MS),
-  STT_BACKEND: z.enum(["faster-whisper"]).default(DEFAULT_STT_BACKEND),
-  STT_DEFAULT_LANGUAGE: optionalTrimmedStringSchema,
-  STT_FASTER_WHISPER_PYTHON_PATH: z
-    .string()
-    .trim()
-    .min(1, "STT_FASTER_WHISPER_PYTHON_PATH must be set to a non-empty value")
-    .default(DEFAULT_STT_FASTER_WHISPER_PYTHON_PATH),
-  STT_FASTER_WHISPER_MODEL: z
-    .string()
-    .trim()
-    .min(1, "STT_FASTER_WHISPER_MODEL must be set to a non-empty value")
-    .default(DEFAULT_STT_FASTER_WHISPER_MODEL),
-  STT_FASTER_WHISPER_DEVICE: z
-    .string()
-    .trim()
-    .min(1, "STT_FASTER_WHISPER_DEVICE must be set to a non-empty value")
-    .default(DEFAULT_STT_FASTER_WHISPER_DEVICE),
-  STT_FASTER_WHISPER_COMPUTE_TYPE: z
-    .string()
-    .trim()
-    .min(1, "STT_FASTER_WHISPER_COMPUTE_TYPE must be set to a non-empty value")
-    .default(DEFAULT_STT_FASTER_WHISPER_COMPUTE_TYPE),
-  STT_FASTER_WHISPER_BEAM_SIZE: z.coerce
-    .number()
-    .int()
-    .positive("STT_FASTER_WHISPER_BEAM_SIZE must be a positive integer")
-    .default(DEFAULT_STT_FASTER_WHISPER_BEAM_SIZE),
-  PROCESSING_STATE_FILE_PATH: z.string().trim().min(1).default(DEFAULT_PROCESSING_STATE_FILE_PATH),
-  PROCESSING_MAX_RETRY_ATTEMPTS: z.coerce
-    .number()
-    .int()
-    .positive("PROCESSING_MAX_RETRY_ATTEMPTS must be a positive integer")
-    .default(DEFAULT_PROCESSING_MAX_RETRY_ATTEMPTS),
-  PROCESSING_RETRY_BACKOFF_MS: z.coerce
-    .number()
-    .int()
-    .nonnegative("PROCESSING_RETRY_BACKOFF_MS must be zero or a positive integer")
-    .default(DEFAULT_PROCESSING_RETRY_BACKOFF_MS),
-});
+const runtimeConfigSchema = z
+  .object({
+    SIDECAR_SERVICE_NAME: z
+      .string()
+      .trim()
+      .min(1, "SIDECAR_SERVICE_NAME must be set to a non-empty value"),
+    NODE_ENV: z.enum(["development", "test", "production"]),
+    SIDECAR_LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
+    DISPATCH_MODE: z.enum(["slack-repost", "opendispatch-http"]).default(DEFAULT_DISPATCH_MODE),
+    OPENDISPATCH_HTTP_BASE_URL: optionalUrlStringSchema,
+    OPENDISPATCH_HTTP_ENDPOINT_PATH: dispatchEndpointPathSchema,
+    OPENDISPATCH_HTTP_AUTH_TOKEN: optionalTrimmedStringSchema,
+    OPENDISPATCH_HTTP_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive("OPENDISPATCH_HTTP_TIMEOUT_MS must be a positive integer")
+      .default(DEFAULT_OPENDISPATCH_HTTP_TIMEOUT_MS),
+    SLACK_BOT_TOKEN: z
+      .string()
+      .trim()
+      .regex(/^xoxb-[A-Za-z0-9-]+$/, "SLACK_BOT_TOKEN must be a Slack bot token starting with xoxb-"),
+    SLACK_APP_TOKEN: z
+      .string()
+      .trim()
+      .regex(/^xapp-[A-Za-z0-9-]+$/, "SLACK_APP_TOKEN must be a Slack app token starting with xapp-"),
+    SLACK_ALLOWLISTED_CHANNELS: slackAllowlistedChannelsSchema,
+    SLACK_FAILURE_NOTICES_ENABLED: booleanFromEnvironmentSchema,
+    AUDIO_NORMALIZATION_FFMPEG_PATH: z.string().trim().min(1).default("ffmpeg"),
+    AUDIO_NORMALIZATION_FFPROBE_PATH: z.string().trim().min(1).default("ffprobe"),
+    AUDIO_NORMALIZATION_TEMP_DIRECTORY: z.string().trim().min(1).default(DEFAULT_AUDIO_TEMP_DIRECTORY),
+    AUDIO_NORMALIZATION_MAX_INPUT_BYTES: z.coerce
+      .number()
+      .int()
+      .positive("AUDIO_NORMALIZATION_MAX_INPUT_BYTES must be a positive integer")
+      .default(DEFAULT_NORMALIZATION_MAX_INPUT_BYTES),
+    AUDIO_NORMALIZATION_MAX_DURATION_MS: z.coerce
+      .number()
+      .int()
+      .positive("AUDIO_NORMALIZATION_MAX_DURATION_MS must be a positive integer")
+      .default(DEFAULT_NORMALIZATION_MAX_DURATION_MS),
+    STT_BACKEND: z.enum(["faster-whisper"]).default(DEFAULT_STT_BACKEND),
+    STT_DEFAULT_LANGUAGE: optionalTrimmedStringSchema,
+    STT_FASTER_WHISPER_PYTHON_PATH: z
+      .string()
+      .trim()
+      .min(1, "STT_FASTER_WHISPER_PYTHON_PATH must be set to a non-empty value")
+      .default(DEFAULT_STT_FASTER_WHISPER_PYTHON_PATH),
+    STT_FASTER_WHISPER_MODEL: z
+      .string()
+      .trim()
+      .min(1, "STT_FASTER_WHISPER_MODEL must be set to a non-empty value")
+      .default(DEFAULT_STT_FASTER_WHISPER_MODEL),
+    STT_FASTER_WHISPER_DEVICE: z
+      .string()
+      .trim()
+      .min(1, "STT_FASTER_WHISPER_DEVICE must be set to a non-empty value")
+      .default(DEFAULT_STT_FASTER_WHISPER_DEVICE),
+    STT_FASTER_WHISPER_COMPUTE_TYPE: z
+      .string()
+      .trim()
+      .min(1, "STT_FASTER_WHISPER_COMPUTE_TYPE must be set to a non-empty value")
+      .default(DEFAULT_STT_FASTER_WHISPER_COMPUTE_TYPE),
+    STT_FASTER_WHISPER_BEAM_SIZE: z.coerce
+      .number()
+      .int()
+      .positive("STT_FASTER_WHISPER_BEAM_SIZE must be a positive integer")
+      .default(DEFAULT_STT_FASTER_WHISPER_BEAM_SIZE),
+    PROCESSING_STATE_FILE_PATH: z.string().trim().min(1).default(DEFAULT_PROCESSING_STATE_FILE_PATH),
+    PROCESSING_MAX_RETRY_ATTEMPTS: z.coerce
+      .number()
+      .int()
+      .positive("PROCESSING_MAX_RETRY_ATTEMPTS must be a positive integer")
+      .default(DEFAULT_PROCESSING_MAX_RETRY_ATTEMPTS),
+    PROCESSING_RETRY_BACKOFF_MS: z.coerce
+      .number()
+      .int()
+      .nonnegative("PROCESSING_RETRY_BACKOFF_MS must be zero or a positive integer")
+      .default(DEFAULT_PROCESSING_RETRY_BACKOFF_MS),
+  })
+  .superRefine((data, context) => {
+    if (data.DISPATCH_MODE === "opendispatch-http" && !data.OPENDISPATCH_HTTP_BASE_URL) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["OPENDISPATCH_HTTP_BASE_URL"],
+        message: "OPENDISPATCH_HTTP_BASE_URL must be set when DISPATCH_MODE=opendispatch-http",
+      });
+    }
+  });
 
 export type NodeEnvironment = z.infer<typeof runtimeConfigSchema>["NODE_ENV"];
 export type LogLevel = z.infer<typeof runtimeConfigSchema>["SIDECAR_LOG_LEVEL"];
+export type DispatchMode = z.infer<typeof runtimeConfigSchema>["DISPATCH_MODE"];
 
 export interface SlackConfig {
   botToken: string;
@@ -142,10 +193,23 @@ export interface SlackConfig {
   failureNoticesEnabled: boolean;
 }
 
+export interface OpenDispatchHttpConfig {
+  baseUrl?: string;
+  endpointPath: string;
+  authToken?: string;
+  timeoutMs: number;
+}
+
+export interface DispatchConfig {
+  mode: DispatchMode;
+  openDispatchHttp: OpenDispatchHttpConfig;
+}
+
 export interface RuntimeConfig {
   serviceName: string;
   nodeEnv: NodeEnvironment;
   logLevel: LogLevel;
+  dispatch: DispatchConfig;
   slack: SlackConfig;
   normalization: AudioNormalizationConfig;
   stt: STTConfig;
@@ -206,6 +270,19 @@ export const loadConfig = (): RuntimeConfig => {
     serviceName: parsedConfig.data.SIDECAR_SERVICE_NAME,
     nodeEnv: parsedConfig.data.NODE_ENV,
     logLevel: parsedConfig.data.SIDECAR_LOG_LEVEL,
+    dispatch: {
+      mode: parsedConfig.data.DISPATCH_MODE,
+      openDispatchHttp: {
+        ...(parsedConfig.data.OPENDISPATCH_HTTP_BASE_URL
+          ? { baseUrl: parsedConfig.data.OPENDISPATCH_HTTP_BASE_URL.replace(/\/+$/, "") }
+          : {}),
+        endpointPath: parsedConfig.data.OPENDISPATCH_HTTP_ENDPOINT_PATH,
+        ...(parsedConfig.data.OPENDISPATCH_HTTP_AUTH_TOKEN
+          ? { authToken: parsedConfig.data.OPENDISPATCH_HTTP_AUTH_TOKEN }
+          : {}),
+        timeoutMs: parsedConfig.data.OPENDISPATCH_HTTP_TIMEOUT_MS,
+      },
+    },
     slack: {
       botToken: parsedConfig.data.SLACK_BOT_TOKEN,
       appToken: parsedConfig.data.SLACK_APP_TOKEN,

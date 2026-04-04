@@ -82,19 +82,25 @@ The MVP does not introduce hidden fallback across STT backends. Unsupported back
 
 ## Dispatch seam
 
-The first dispatch path is an explicit Slack fallback adapter:
+Dispatch remains an explicit adapter boundary selected from runtime config:
 
 - `src/adapters/dispatch/base.ts` defines the narrow transcript-delivery contract used by the service seam.
-- `src/adapters/dispatch/slack/adapter.ts` maps normalized conversation identity into Slack channel and thread targets, formats transcript-first repost text, and emits structured repost logs.
+- `src/services/service.ts` selects one configured dispatch mode at startup and records dispatch completion in persisted state after the adapter returns successfully.
+- `src/adapters/dispatch/slack/adapter.ts` maps normalized conversation identity into Slack channel and thread targets, formats transcript-first repost text, and emits structured repost logs when `DISPATCH_MODE=slack-repost`.
 - `src/adapters/dispatch/slack/api.ts` owns the Slack Web API seam for thread-targeted `chat.postMessage` calls.
-- `src/services/service.ts` keeps transcript delivery behind the dispatch adapter boundary after STT completes and records dispatch completion in persisted state.
+- `src/adapters/dispatch/opendispatch/adapter.ts` maps canonical `TranscriptEnvelope` values into the sidecar-owned Open Dispatch ingress payload when `DISPATCH_MODE=opendispatch-http`.
+- `src/adapters/dispatch/opendispatch/api.ts` owns the HTTP transport seam, timeout handling, and explicit retryability classification for ingress calls.
 
-The MVP repost path now relies on persisted processing state keyed by the shared normalized dedupe key. Duplicate suppression and dispatch completion survive restarts because the orchestration layer skips terminal processing units before dispatch is attempted again.
+The sidecar does not silently fall back between dispatch modes. If Open Dispatch HTTP ingress is selected, startup requires the corresponding endpoint configuration and runtime delivery failures stay within that mode.
+
+The Open Dispatch payload stays transcript-focused: it includes canonical `source`, `conversationKey`, `dedupeKey`, transcript text, and minimal identity metadata, while excluding fetched-audio paths, normalization artifacts, and other source-specific media-processing details.
+
+The MVP repost path still relies on persisted processing state keyed by the shared normalized dedupe key. Duplicate suppression and dispatch completion survive restarts because the orchestration layer skips terminal processing units before dispatch is attempted again.
 
 ## Retry and failure policy
 
 - `src/services/service.ts` owns bounded retries so provider-specific adapters do not hide retry behavior.
-- Retry classification follows explicit `retryable` metadata from canonical error types when available.
+- Retry classification follows explicit `retryable` metadata from canonical error types when available, including Open Dispatch transport errors, timeouts, retryable upstream responses, and non-retryable contract failures.
 - Retryable failures increment the persisted attempt counter until `PROCESSING_MAX_RETRY_ATTEMPTS` is exhausted.
 - Exhausted or non-retryable failures persist a terminal `failed` state with the latest error code, message, and retryability context.
 - Structured logs for terminal failure include `source`, `conversationKey`, `dedupeKey`, `stage`, and error fields.
@@ -114,6 +120,8 @@ Modules should add context through child loggers so those fields stay consistent
 ## Configuration contract
 
 Runtime configuration is loaded once in `src/config/index.ts`. The rest of the application receives typed configuration objects instead of reading environment variables directly. This keeps validation centralized and makes startup failures clear and early.
+
+Dispatch mode selection is part of that contract. `DISPATCH_MODE=slack-repost` enables Slack repost delivery, while `DISPATCH_MODE=opendispatch-http` requires explicit Open Dispatch ingress configuration and keeps the linked server-endpoint dependency visible instead of assuming the endpoint is implemented in this repository.
 
 ## Current scope
 

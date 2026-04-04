@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import type { RuntimeConfig } from "../config";
 import {
   createDispatchTranscriptHandler,
+  createOpenDispatchHttpAdapter,
   createSlackDispatchAdapter,
   type TranscriptDispatchAdapter,
 } from "../adapters/dispatch";
@@ -37,6 +38,7 @@ interface ServiceDependencies {
   processingStateStore?: ProcessingStateStore;
   slackSourceServiceFactory?: typeof createSlackSourceService;
   slackDispatchAdapterFactory?: typeof createSlackDispatchAdapter;
+  openDispatchAdapterFactory?: typeof createOpenDispatchHttpAdapter;
 }
 
 interface ClassifiedFailure {
@@ -456,21 +458,28 @@ export const createService = ({
   processingStateStore: injectedProcessingStateStore,
   slackSourceServiceFactory,
   slackDispatchAdapterFactory,
+  openDispatchAdapterFactory,
 }: ServiceDependencies): LifecycleService => {
   const audioNormalizer = injectedAudioNormalizer ?? createFfmpegAudioNormalizer(config.normalization);
   const sttAdapter = injectedSttAdapter ?? createSTTAdapter(config.stt);
   const processingStateStore =
     injectedProcessingStateStore ?? createFileProcessingStateStore(config.processing.stateFilePath);
   const buildSlackDispatchAdapter = slackDispatchAdapterFactory ?? createSlackDispatchAdapter;
+  const buildOpenDispatchAdapter = openDispatchAdapterFactory ?? createOpenDispatchHttpAdapter;
   const transcriptDispatchAdapter =
     injectedTranscriptDispatchAdapter ??
     (injectedTranscriptHandler
       ? undefined
-      : buildSlackDispatchAdapter({
-          config: config.slack,
-          serviceName: config.serviceName,
-          logger,
-        }));
+      : config.dispatch.mode === "slack-repost"
+        ? buildSlackDispatchAdapter({
+            config: config.slack,
+            serviceName: config.serviceName,
+            logger,
+          })
+        : buildOpenDispatchAdapter({
+            config: config.dispatch.openDispatchHttp,
+            logger,
+          }));
   const transcriptHandler =
     injectedTranscriptHandler ??
     createCompositeTranscriptHandler(
@@ -535,6 +544,7 @@ export const createService = ({
         {
           event: "service_initialized",
           serviceName: config.serviceName,
+          dispatchMode: config.dispatch.mode,
           processingStateFilePath: config.processing.stateFilePath,
           processingMaxRetryAttempts: config.processing.maxRetryAttempts,
           processingRetryBackoffMs: config.processing.retryBackoffMs,

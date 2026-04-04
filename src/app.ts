@@ -13,6 +13,17 @@ export const bootstrap = async (): Promise<BootstrappedApp> => {
   const service = createService({ config, logger });
 
   bootstrapLogger.info({ event: "startup_begin" }, "Starting sidecar service");
+  bootstrapLogger.info(
+    {
+      event: "dispatch_mode_selected",
+      dispatchMode: config.dispatch.mode,
+      openDispatchEndpointPath: config.dispatch.openDispatchHttp.endpointPath,
+      openDispatchBaseUrl: config.dispatch.mode === "opendispatch-http"
+        ? config.dispatch.openDispatchHttp.baseUrl
+        : undefined,
+    },
+    "Selected transcript dispatch mode"
+  );
   await service.start();
   bootstrapLogger.info(
     { event: "startup_complete" },

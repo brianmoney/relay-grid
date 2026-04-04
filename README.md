@@ -1,6 +1,6 @@
 # relay-grid sidecar
 
-This repository bootstraps the sidecar service that ingests audio-bearing events, normalizes media, transcribes audio, and dispatches transcript text into an agent backend. The current MVP includes the first concrete source path: Slack Socket Mode intake for allowlisted channels, audio attachment detection, file metadata resolution, authenticated audio download, normalized identity mapping into the provider-agnostic contracts used by the rest of the sidecar, and fallback transcript repost delivery back into the originating Slack thread.
+This repository bootstraps the sidecar service that ingests audio-bearing events, normalizes media, transcribes audio, and dispatches transcript text into an agent backend. The current MVP includes the first concrete source path: Slack Socket Mode intake for allowlisted channels, audio attachment detection, file metadata resolution, authenticated audio download, normalized identity mapping into the provider-agnostic contracts used by the rest of the sidecar, plus explicit dispatch delivery through either Slack repost fallback or a linked Open Dispatch HTTP ingress endpoint.
 
 ## Prerequisites
 
@@ -23,6 +23,11 @@ This repository bootstraps the sidecar service that ingests audio-bearing events
 - `SIDECAR_SERVICE_NAME`: logical service name emitted in logs.
 - `NODE_ENV`: runtime environment. Allowed values are `development`, `test`, or `production`.
 - `SIDECAR_LOG_LEVEL`: structured log level. Allowed values are `fatal`, `error`, `warn`, `info`, `debug`, `trace`, or `silent`.
+- `DISPATCH_MODE`: transcript delivery mode. Allowed values are `slack-repost` or `opendispatch-http`.
+- `OPENDISPATCH_HTTP_BASE_URL`: required absolute base URL when `DISPATCH_MODE=opendispatch-http`.
+- `OPENDISPATCH_HTTP_ENDPOINT_PATH`: ingress endpoint path joined onto `OPENDISPATCH_HTTP_BASE_URL`. Defaults to `/ingress/transcripts`.
+- `OPENDISPATCH_HTTP_AUTH_TOKEN`: optional bearer token sent to the Open Dispatch ingress endpoint.
+- `OPENDISPATCH_HTTP_TIMEOUT_MS`: request timeout for Open Dispatch HTTP ingress. Defaults to `10000`.
 - `SLACK_BOT_TOKEN`: Slack bot token used for authenticated API calls and file download. Must start with `xoxb-`.
 - `SLACK_APP_TOKEN`: Slack app-level Socket Mode token. Must start with `xapp-`.
 - `SLACK_ALLOWLISTED_CHANNELS`: comma-separated Slack channel IDs the sidecar is allowed to ingest from.
@@ -67,9 +72,15 @@ The provider-agnostic STT seam lives under `src/adapters/stt/` and runs immediat
 - The service forwards a `TranscriptEnvelope` into the next provider-agnostic seam without coupling the pipeline to dispatch behavior.
 - Structured STT logs include `source`, `conversationKey`, `dedupeKey`, and `stage` context while avoiding raw transcript text in logs.
 
-## Slack fallback dispatch behavior
+## Dispatch behavior
 
-The first dispatch path is a Slack-only fallback that reposts transcript text into the originating Slack thread after STT succeeds.
+The sidecar selects one explicit dispatch target at startup.
+
+- `DISPATCH_MODE=slack-repost` keeps the existing Slack-only fallback that reposts transcript text into the originating Slack thread after STT succeeds.
+- `DISPATCH_MODE=opendispatch-http` posts canonical transcript ingress payloads to a configured Open Dispatch HTTP endpoint.
+- The sidecar never auto-falls back from `opendispatch-http` to `slack-repost` during a run. Switching modes is an explicit operator choice.
+
+### Slack repost mode
 
 - The dispatch adapter lives under `src/adapters/dispatch/slack/` and only receives canonical `TranscriptEnvelope` objects.
 - Thread targeting comes from normalized conversation identity: `conversationId` maps to the Slack channel and `threadId` maps to the repost thread timestamp.
@@ -78,6 +89,15 @@ The first dispatch path is a Slack-only fallback that reposts transcript text in
 - Duplicate repost suppression is now keyed from the persisted normalized dedupe key and survives process restarts.
 - Structured dispatch logs include repost attempts, duplicate skips, repost success, and repost failure with stable `source`, `conversationKey`, `dedupeKey`, and `stage` fields.
 
+### Open Dispatch HTTP mode
+
+- The HTTP adapter lives under `src/adapters/dispatch/opendispatch/` and stays limited to payload mapping, HTTP transport, and explicit error surfacing.
+- Request bodies include canonical `source`, `conversationKey`, `dedupeKey`, transcript text, and minimal identity metadata needed for downstream routing continuity.
+- Request bodies intentionally exclude fetched-audio paths, normalization artifact paths, and other source-specific media-processing details.
+- Transport failures, timeouts, `408`, `425`, `429`, and `5xx` responses surface as retryable failures to the existing orchestration policy.
+- Contract-style failures such as `4xx` request errors surface as non-retryable failures and do not trigger hidden adapter-level retries.
+- This repository only owns the sidecar HTTP client path. The receiving Open Dispatch endpoint may live in another repository and should be tracked as a linked dependency there.
+
 ## Processing state and retries
 
 The service now persists canonical processing state under `src/store/` and drives retries from `src/services/service.ts`.
@@ -85,7 +105,7 @@ The service now persists canonical processing state under `src/store/` and drive
 - Each processing unit is keyed by the shared normalized `conversationKey` and `dedupeKey`.
 - Persisted records track the latest canonical stage, attempt count, timestamps, and terminal failure details.
 - Duplicate replay after restart is suppressed once a unit reaches `completed`, `dispatched`, or `failed`.
-- Retry classification stays explicit in orchestration code and follows the `retryable` metadata exposed by normalization/STT errors.
+- Retry classification stays explicit in orchestration code and follows the `retryable` metadata exposed by normalization, STT, and Open Dispatch HTTP adapter errors.
 - Retryable failures stop automatically after `PROCESSING_MAX_RETRY_ATTEMPTS`, then persist a terminal `failed` state and emit a structured log.
 - When `SLACK_FAILURE_NOTICES_ENABLED=true`, terminal failures also post a concise Slack notice into the originating thread.
 

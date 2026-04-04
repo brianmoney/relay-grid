@@ -22,6 +22,13 @@ const TEST_CONFIG: RuntimeConfig = {
   serviceName: "relay-grid-sidecar",
   nodeEnv: "test",
   logLevel: "silent",
+  dispatch: {
+    mode: "slack-repost",
+    openDispatchHttp: {
+      endpointPath: "/ingress/transcripts",
+      timeoutMs: 10_000,
+    },
+  },
   slack: {
     botToken: "xoxb-test-token",
     appToken: "xapp-test-token",
@@ -623,4 +630,84 @@ test("file-backed processing state survives restart and suppresses duplicate rep
 
   await rm(dirname(localPath), { recursive: true, force: true });
   await rm(tempDir, { recursive: true, force: true });
+});
+
+test("service selects the Open Dispatch adapter when opendispatch-http mode is configured", async () => {
+  const logger = pino({ level: "silent" });
+  const calls: string[] = [];
+  let capturedSourceEventHandler: SourceEventHandler | null = null;
+  const localPath = await createTempSourceAudio();
+
+  const service = createService({
+    config: {
+      ...TEST_CONFIG,
+      dispatch: {
+        mode: "opendispatch-http",
+        openDispatchHttp: {
+          baseUrl: "http://127.0.0.1:8787",
+          endpointPath: "/ingress/transcripts",
+          timeoutMs: 5_000,
+        },
+      },
+    },
+    logger,
+    audioNormalizer: {
+      async assertReady() {},
+      async normalize() {
+        return createNormalizedAudio();
+      },
+      async cleanup() {},
+    },
+    sttAdapter: {
+      backend: "faster-whisper",
+      async assertReady() {},
+      async transcribe() {
+        return createTranscription();
+      },
+    },
+    processingStateStore: createMemoryProcessingStateStore(),
+    openDispatchAdapterFactory: ({ config: dispatchConfig }) => {
+      calls.push(`opendispatch-factory:${dispatchConfig.baseUrl}${dispatchConfig.endpointPath}`);
+
+      return {
+        async dispatch() {
+          calls.push("opendispatch-dispatch");
+        },
+      };
+    },
+    slackDispatchAdapterFactory: () => {
+      calls.push("slack-factory");
+      return {
+        async dispatch() {
+          calls.push("slack-dispatch");
+        },
+      };
+    },
+    slackSourceServiceFactory: createSlackSourceServiceFactory(
+      calls,
+      () => createFetchedAudio(localPath),
+      (handler) => {
+        capturedSourceEventHandler = handler;
+      }
+    ),
+  });
+  const getCapturedSourceEventHandler = (): SourceEventHandler => {
+    if (!capturedSourceEventHandler) {
+      throw new Error("expected source event handler");
+    }
+
+    return capturedSourceEventHandler;
+  };
+
+  await service.start();
+  await getCapturedSourceEventHandler().handle(createSourceEvent());
+
+  assert.deepEqual(calls, [
+    "opendispatch-factory:http://127.0.0.1:8787/ingress/transcripts",
+    "source:start",
+    "source:fetch",
+    "opendispatch-dispatch",
+  ]);
+
+  await rm(dirname(localPath), { recursive: true, force: true });
 });

@@ -38,3 +38,17 @@ The sidecar SHALL allow processing state to be associated with normalized conver
 #### Scenario: State can be linked to keys used elsewhere in the system
 - **WHEN** sidecar code emits logs or updates future persistence for a processing unit
 - **THEN** the processing-state contract can be associated with the relevant conversation key and dedupe key
+
+### Requirement: Processing state supports persisted runtime progress
+The sidecar SHALL persist runtime processing-state records that track attempt count, timestamps, and the latest stage reached for a processing unit.
+
+#### Scenario: Runtime progress survives restart
+- **WHEN** a processing unit advances through one or more stages and the sidecar restarts
+- **THEN** the persisted processing-state record still reflects the latest known stage, attempt count, and timing information for that unit
+
+### Requirement: Processing state records terminal failure details
+The sidecar SHALL persist terminal failure details alongside the canonical processing-state record when a processing unit fails permanently.
+
+#### Scenario: Terminal failure retains last known error details
+- **WHEN** a processing unit reaches the `failed` state permanently
+- **THEN** the persisted processing-state record includes the latest relevant failure code, message, and retryability context
